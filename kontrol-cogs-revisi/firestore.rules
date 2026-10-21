@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------
+    // Helper: 1 get() per evaluasi (hemat kuota akses dokumen rules)
+    // Profil login ada di users/{uid}. Tanpa profil => semua akses ditolak.
+    // ------------------------------------------------------------------
+    function signedIn() {
+      return request.auth != null;
+    }
+    function profile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    // Versi aman untuk akun yang belum punya profil (tidak error saat dokumen belum ada)
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && profile().active == true
+        && profile().role == 'admin';
+    }
+    // Boleh BACA data outlet tertentu (admin = semua, manager/viewer = outlet miliknya)
+    function canRead(outlet) {
+      let u = profile();
+      return signedIn() && u.active == true &&
+        (u.role == 'admin' || outlet in u.outlets);
+    }
+    // Boleh TULIS (tambah/ubah/hapus) data outlet tertentu (admin & manager, bukan viewer)
+    function canWrite(outlet) {
+      let u = profile();
+      return signedIn() && u.active == true &&
+        (u.role == 'admin' || (u.role == 'manager' && outlet in u.outlets));
+    }
+    function validIdentity(d) {
+      return d.outlet is string && d.outlet.size() > 0 && d.outlet.size() <= 100
+          && d.periode is string && d.periode.size() <= 50;
+    }
+
+    // ------------------------------------------------------------------
+    // Akun pengguna
+    // ------------------------------------------------------------------
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+
+      // Admin membuat akun lain. Admin PERTAMA dibuat sekali lewat meta/bootstrap.
+      allow create: if isAdmin()
+        || (signedIn() && request.auth.uid == uid
+            && request.resource.data.role == 'admin'
+            && request.resource.data.active == true
+            && !exists(/databases/$(database)/documents/meta/bootstrap));
+
+      allow update, delete: if isAdmin();
+    }
+
+    // Penanda "setup admin pertama sudah dilakukan".
+    // Boleh dibaca publik (hanya berisi tanggal) agar layar login tahu perlu setup atau tidak.
+    match /meta/bootstrap {
+      allow read: if true;
+      allow create: if signedIn()
+        && !exists(/databases/$(database)/documents/meta/bootstrap)
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+      allow update, delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Data COGS / Purchasing (dibatasi per outlet)
+    // ------------------------------------------------------------------
+    match /monthly_reports/{docId} {
+      allow read:   if canRead(resource.data.outlet);
+      allow create: if canWrite(request.resource.data.outlet) && validIdentity(request.resource.data);
+      allow update: if canWrite(resource.data.outlet) && canWrite(request.resource.data.outlet)
+                    && validIdentity(request.resource.data);
+      // Ingin hapus hanya admin? ganti baris di bawah menjadi: allow delete: if isAdmin();
+      allow delete: if canWrite(resource.data.outlet);
+    }
+
+    match /category_analysis/{docId} {
+      allow read:   if canRead(resource.data.outlet);
+      allow create: if canWrite(request.resource.data.outlet) && validIdentity(request.resource.data);
+      allow update: if canWrite(resource.data.outlet) && canWrite(request.resource.data.outlet)
+                    && validIdentity(request.resource.data);
+      allow delete: if canWrite(resource.data.outlet);
+    }
+
+    match /waste_logs/{docId} {
+      allow read:   if canRead(resource.data.outlet);
+      allow create: if canWrite(request.resource.data.outlet) && validIdentity(request.resource.data);
+      allow update: if canWrite(resource.data.outlet) && canWrite(request.resource.data.outlet)
+                    && validIdentity(request.resource.data);
+      allow delete: if canWrite(resource.data.outlet);
+    }
+  }
+}
